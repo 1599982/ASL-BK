@@ -52,4 +52,4 @@ def process_frame():
     return jsonify({"hands": hands_results})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="161.132.54.35", port=5000)
