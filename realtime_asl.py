@@ -1,9 +1,10 @@
-from flask import Flask, Response, jsonify
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import cv2
 import mediapipe as mp
 import numpy as np
 import pickle
+import base64
 
 app = Flask(__name__)
 CORS(app)
@@ -14,10 +15,6 @@ with open("asl_model.pkl", "rb") as f:
 
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
-cap = cv2.VideoCapture(0)
-
-# Estado global de predicciones
-last_predictions = []
 
 def extract_landmarks(hand_landmarks):
     """Extrae los landmarks en formato [x,y,z,...]"""
@@ -26,64 +23,33 @@ def extract_landmarks(hand_landmarks):
         data.extend([lm.x, lm.y, lm.z])
     return np.array(data)
 
-def gen_frames():
-    global last_predictions
+@app.route("/process_frame", methods=["POST"])
+def process_frame():
+    data = request.json
+    frame_data = data.get("frame")
+    if not frame_data:
+        return jsonify({"hands": []})
+
+    # Convertir base64 a numpy array
+    header, encoded = frame_data.split(",", 1)
+    decoded = base64.b64decode(encoded)
+    nparr = np.frombuffer(decoded, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    hands_results = []
     with mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.7) as hands:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(rgb)
 
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = hands.process(rgb)
-            predictions = []
+        if results.multi_hand_landmarks and results.multi_handedness:
+            for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
+                data = extract_landmarks(hand_landmarks).reshape(1, -1)
+                pred = model.predict(data)[0]
 
-            if results.multi_hand_landmarks and results.multi_handedness:
-                for idx, (hand_landmarks, handedness) in enumerate(
-                    zip(results.multi_hand_landmarks, results.multi_handedness)
-                ):
-                    # Extraer landmarks y predecir
-                    data = extract_landmarks(hand_landmarks).reshape(1, -1)
-                    pred = model.predict(data)[0]
+                hand_label = 1 if handedness.classification[0].label == "Left" else 2
+                hands_results.append({"hand": hand_label, "letter": str(pred)})
 
-                    # Determinar si es izquierda o derecha
-                    label = handedness.classification[0].label  # "Left" o "Right"
-                    if label == "Left":
-                        color = (0, 0, 255)  # 🔴 rojo en BGR
-                    else:
-                        color = (255, 0, 0)  # 🔵 azul en BGR
-
-                    # Dibujar landmarks con color personalizado
-                    mp_drawing.draw_landmarks(
-                        frame,
-                        hand_landmarks,
-                        mp_hands.HAND_CONNECTIONS,
-                        mp_drawing.DrawingSpec(color=color, thickness=2, circle_radius=3),
-                        mp_drawing.DrawingSpec(color=color, thickness=2)
-                    )
-
-                    # Guardar predicción
-                    predictions.append({
-                        "hand": 1 if label == "Left" else 2,
-                        "letter": str(pred)
-                    })
-
-            last_predictions = predictions
-
-            # Codificar frame en JPEG para el stream
-            _, buffer = cv2.imencode('.jpg', frame)
-            frame = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
-@app.route("/video_feed")
-def video_feed():
-    return Response(gen_frames(),
-                    mimetype="multipart/x-mixed-replace; boundary=frame")
-
-@app.route("/prediction")
-def prediction():
-    return jsonify({"hands": last_predictions})
+    return jsonify({"hands": hands_results})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
